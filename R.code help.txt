@@ -1,0 +1,151 @@
+You can always find more data from the internet about this context and use for better use.
+In my project i have taken only weather conditions for the call drop predictions you can add more and different conditions for the same.
+
+This project will show you a comparison between Randon forest and XG Boost in a particular dataset.
+
+
+
+
+heres the code:
+library(dplyr)
+library(readxl)
+library(xgboost)
+library(pROC)
+library(randomForest)
+library(caret)
+library(ggplot2)
+call_data <- read_excel("C:/Users/somir/Desktop/Arafat.xlsx")
+weather_data <- read.csv("C:/Users/somir/Desktop/weatherHistory.csv")
+head(weather_data$Date)
+names(weather_data)
+# 2. Fix Date columns
+class(call_data)
+
+call_data$Date <- as.Date(as.numeric(call_data$Date), origin = "1899-12-30")
+# Convert Formatted.Date to POSIXct (datetime)
+weather_data$Formatted.Date <- as.POSIXct(weather_data$Formatted.Date, format = "%Y-%m-%d %H:%M:%S")
+
+# Extract just the Date part for merging
+weather_data$Date <- as.Date(weather_data$Formatted.Date)
+
+
+# 3. Merge datasets
+full_data <- merge(call_data, weather_data, by = "Date")
+
+# 4. Clean + Feature Engineering
+full_data <- full_data %>%
+  mutate(
+    Duration = as.numeric(Duration),
+    Drop_Status = ifelse(Duration <= 10, 1, 0)
+  )
+
+full_data$Summary <- as.factor(full_data$Summary)
+summary(full_data$Duration)
+
+
+# 5. Prepare model data
+threshold_days <- 30 / (24 * 60 * 60)  # 30 seconds in days
+
+full_data <- full_data %>%
+  mutate(
+    Duration = as.numeric(Duration),
+    Drop_Status = ifelse(Duration <= threshold_days, 1, 0)
+  )
+model_data <- full_data %>%
+  select(Drop_Status, Summary, Temperature..C., Humidity, Wind.Speed..km.h., 
+         Visibility..km., Pressure..millibars., Closeness) %>%
+  filter(!is.na(Drop_Status))
+
+table(model_data$Drop_Status)  # Check distribution of classes
+
+
+# 6. Train-Test Split
+nrow(model_data)
+table(model_data$Drop_Status)
+
+set.seed(123)
+trainIndex <- createDataPartition(model_data$Drop_Status, p = 0.8, list = FALSE)
+trainData <- model_data[trainIndex, ]
+testData <- model_data[-trainIndex, ]
+
+# 7. Make sure target variable is a factor for Random Forest
+trainData$Drop_Status <- as.factor(trainData$Drop_Status)
+testData$Drop_Status <- as.factor(testData$Drop_Status)
+
+### -------------------
+### XGBOOST MODEL
+### -------------------
+
+# Prepare data for XGBoost
+trainData_numeric <- trainData %>% select(-Summary)
+testData_numeric <- testData %>% select(-Summary)
+
+train_matrix <- xgb.DMatrix(
+  data = as.matrix(trainData_numeric[, -which(names(trainData_numeric) == "Drop_Status")]),
+  label = as.numeric(as.character(trainData_numeric$Drop_Status))
+)
+
+test_matrix <- xgb.DMatrix(
+  data = as.matrix(testData_numeric[, -which(names(testData_numeric) == "Drop_Status")]),
+  label = as.numeric(as.character(testData_numeric$Drop_Status))
+)
+
+# Train XGBoost Model
+xgb_model <- xgboost(
+  data = train_matrix,
+  nrounds = 100,
+  objective = "binary:logistic",
+  eval_metric = "auc",
+  verbose = 0
+)
+
+# Predict on Test Set
+xgb_predictions_prob <- predict(xgb_model, test_matrix)
+
+# ROC and AUC for XGBoost
+roc_obj_xgb <- roc(as.numeric(as.character(testData$Drop_Status)), xgb_predictions_prob)
+
+# Plot ROC curve
+plot(roc_obj_xgb, col = "blue", lwd = 3, main = "XGBoost ROC Curve")
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+# Print AUC
+auc_value_xgb <- auc(roc_obj_xgb)
+print(paste("XGBoost AUC:", auc_value_xgb))
+
+### -------------------
+### RANDOM FOREST MODEL
+### -------------------
+
+# Train Random Forest Model
+set.seed(123)
+rf_model <- randomForest(
+  Drop_Status ~ ., 
+  data = trainData, 
+  ntree = 100
+)
+
+# Predict on Test Set
+rf_predictions <- predict(rf_model, newdata = testData)
+
+# Confusion Matrix
+confusion_rf <- confusionMatrix(rf_predictions, testData$Drop_Status)
+print(confusion_rf)
+
+# Feature Importance Plot (Simple)
+varImpPlot(rf_model)
+
+# Feature Importance Plot (Fancy using ggplot2)
+importance_df <- as.data.frame(importance(rf_model))
+importance_df$Variable <- rownames(importance_df)
+
+ggplot(importance_df, aes(x = reorder(Variable, MeanDecreaseGini), y = MeanDecreaseGini)) +
+  geom_col(fill = "skyblue") +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    title = "Feature Importance (Random Forest)",
+    x = "Variable",
+    y = "Importance Score"
+  )
+
